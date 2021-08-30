@@ -3,6 +3,8 @@
 Python modules and jupyter notebook examples for the paper 
 [Arbitrage-free Neural-SDE Market Models](https://arxiv.org/abs/2105.11053).
 
+[![DOI](https://zenodo.org/badge/397935869.svg)](https://zenodo.org/badge/latestdoi/397935869)
+
 ## Code
 
 ### Installation of pre-requisites
