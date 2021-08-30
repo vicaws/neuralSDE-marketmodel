@@ -39,10 +39,12 @@ The following notebook/script examples show common usage of the code:
 ## Citation
 >```
 >@misc{nsdemm2021,
->    author = {Samuel N. Cohen, Christoph Reisinger, Sheng Wang},  
+>    author = {Samuel N. Cohen and Christoph Reisinger and Sheng Wang},  
 >    title = {neuralSDE-marketmodel},
+>    publisher = {GitHub},
+>    journal = {GitHub repository},
 >    year = {2021},
 >    howpublished = {\url{https://github.com/vicaws/neuralSDE-marketmodel}},
->    note = {commit XXXX}
+>    note = {DOI: 10.5281/zenodo.5337522}
 >}
 >```
