@@ -29,10 +29,10 @@ our paper
 
 The following notebook/script examples show common usage of the code:
 
-1. [Paper I](notebook/paper.ipynb): this notebook loads the offline-trained 
+1. [Paper I](notebook/paper1_hestonslv_experiments.ipynb): this notebook loads the offline-trained 
    checkpoint files for all the neural network models that are used in the 
    published paper [Arbitrage-free Neural-SDE Market Models](https://arxiv.org/abs/2105.11053).
-2. [Paper II](notebook/optionmetrics_VaR.ipynb): this notebook loads the 
+2. [Paper II](notebook/paper2_optionmetrics_VaR.ipynb): this notebook loads the 
    processed historical price data for EUROSTOXX 50 and DAX index options, the 
    pre-decoded factors, and offline-trained checkpoint files for some of the 
    neural network models that are used in the published paper

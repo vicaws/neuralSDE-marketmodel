@@ -827,7 +827,7 @@ class Simulate(object):
                 # get drift and diffusion of S
                 xi = xit[:, i-1]
                 x_S = np.hstack((st[i-1]/factor_multiplier, xi))
-                pred_S = model_S.predict(x_S.reshape(1, -1))[0]
+                pred_S = model_S.predict(x_S.reshape(1, -1), verbose=0)[0]
                 vol_S = np.sqrt(np.exp(-pred_S[0])) * st[i-1]
                 mu_S = pred_S[1] * st[i-1]
 
@@ -836,11 +836,11 @@ class Simulate(object):
 
                 # get baseline drift
                 x_mu = np.hstack((st[i-1]/factor_multiplier, xi))
-                pred_mu_base = model_mu.predict(x_mu.reshape(1, -1))[0]
+                pred_mu_base = model_mu.predict(x_mu.reshape(1, -1), verbose=0)[0]
 
                 # get drift and diffusion of xi
                 x_xi = np.hstack((st[i-1]/factor_multiplier, xi))
-                gamma_nn = model_xi.predict(x_xi.reshape(1,-1))[0]
+                gamma_nn = model_xi.predict(x_xi.reshape(1,-1), verbose=0)[0]
                 gamma_nn[np.array(mask_diagonal).ravel()] = np.exp(
                     gamma_nn[np.array(mask_diagonal).ravel()])
 
@@ -947,7 +947,7 @@ class Simulate(object):
 
                 # get drift and diffusion of S
                 x_S = xi
-                pred_S = model_S.predict(x_S.reshape(1, -1))[0]
+                pred_S = model_S.predict(x_S.reshape(1, -1), verbose=0)[0]
                 vol_S = np.exp(-0.5 * pred_S[0])
 
                 if mu is not None:
@@ -994,7 +994,7 @@ class Simulate(object):
 
                 # get drift and diffusion of xi
                 x_xi = xi
-                gamma_nn = model_xi.predict(x_xi.reshape(1, -1))[0]
+                gamma_nn = model_xi.predict(x_xi.reshape(1, -1), verbose=0)[0]
                 gamma_nn[np.array(mask_diagonal).ravel()] = np.exp(
                     gamma_nn[np.array(mask_diagonal).ravel()])
 
@@ -1051,7 +1051,7 @@ class Simulate(object):
 
         # get drift and diffusion of xi
         x_xi = X0
-        gamma_nn = model_xi.predict(x_xi.reshape(1, -1))[0]
+        gamma_nn = model_xi.predict(x_xi.reshape(1, -1), verbose=0)[0]
         gamma_nn[np.array(mask_diagonal).ravel()] = np.exp(
             gamma_nn[np.array(mask_diagonal).ravel()])
 
@@ -1079,7 +1079,7 @@ class Simulate(object):
 
         # get drift and diffusion of S
         x_S = X0
-        pred_S = model_S.predict(x_S.reshape(1, -1))[0]
+        pred_S = model_S.predict(x_S.reshape(1, -1), verbose=0)[0]
         vol_S = np.exp(-0.5 * pred_S[0])
 
         lnS_sim_deterministic = np.log(S0) + mu_S * dt
@@ -1114,7 +1114,7 @@ class Simulate(object):
 
                 # simulate S
                 x_S = xi_scenario.copy()
-                pred_S = model_S.predict(x_S).ravel()
+                pred_S = model_S.predict(x_S, verbose=0).ravel()
                 vol_S = np.exp(-0.5 * pred_S)
 
                 lnS_sim_deterministic = lnS_scenario + mu_S * dt
@@ -1125,7 +1125,7 @@ class Simulate(object):
 
                 # simulate xi
                 x_xi = xi_scenario.copy()
-                gamma_nn = model_xi.predict(x_xi)
+                gamma_nn = model_xi.predict(x_xi, verbose=0)
                 gamma_nn[:, np.array(mask_diagonal).ravel()] = np.exp(
                     gamma_nn[:, np.array(mask_diagonal).ravel()])
 
