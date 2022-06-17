@@ -759,6 +759,46 @@ class DecodeFactor(object):
         return G_pca, xi_pca
 
     @staticmethod
+    def append_pca_secondary_factors(X, G, cs_ts_X, n_factor_sec,
+                                     norm_factor_sec, mat_A, vec_b):
+        from sklearn.decomposition import PCA
+
+        # compute residuals
+        G0 = G[0]
+        Gx = G[1:]
+        cs_ts_rcnst = X.dot(Gx) + G0[None, :]
+        res = cs_ts_X - cs_ts_rcnst
+
+        # de-mean residuals
+        res_cnst = np.mean(res, axis=0)
+        G0_adj = G[0] + res_cnst
+        G_adj = np.vstack((G0_adj, Gx))
+        res_adj = res - res_cnst[None, :]
+
+        # decompose the residuals using PCA
+        pca_res = PCA(n_components=n_factor_sec)
+        pca_res.fit(res_adj)
+        x = pca_res.transform(res_adj)
+        v = pca_res.components_
+
+        scale_x = norm_factor_sec / (np.max(x, axis=0) - np.min(x, axis=0))
+        X_post = np.hstack((X, x * scale_x[None, :]))
+        G_post = np.vstack((G_adj, v / scale_x[:, None]))
+
+        A_tilde = mat_A.dot(G_post.T)
+        b_tilde = vec_b - A_tilde[:, 0]
+
+        W_full = A_tilde[:, 1:]
+        b_full = b_tilde
+
+        # normalise these constraints
+        norm_W = np.linalg.norm(W_full, axis=1)
+        W_full /= norm_W[:, None]
+        b_full /= norm_W
+
+        return X_post, G_post, W_full, b_full
+
+    @staticmethod
     def find_redundant_constraints(A, b):
         """
         Find redundant constraints of the linear inequality system Ax <= b.

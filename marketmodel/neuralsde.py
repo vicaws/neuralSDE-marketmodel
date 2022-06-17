@@ -3,7 +3,7 @@ Construct, train neural-SDE models and simulate trajectories from the learnt
 models.
 """
 
-# Copyright 2021 Sheng Wang.
+# Copyright 2022 Sheng Wang.
 # Affiliation: Mathematical Institute, University of Oxford
 # Email: sheng.wang@maths.ox.ac.uk
 
@@ -56,6 +56,37 @@ class Loss(object):
             l = tf.reduce_sum(2*tf.math.log(S)-alpha + tf.square(dS - mu*dt) *
                               tf.exp(alpha) / dt / S**2)
             return l
+        return loss
+
+    @staticmethod
+    def loss_lnS_const_drift(dt, mu):
+        """
+        Loss function for the neural SDE model of ln(S).
+
+        Parameters
+        __________
+        dt: float
+            Time increment.
+        mu: float
+            Drift parameter.
+
+        Returns
+        _______
+        loss: method
+            Loss function.
+
+        """
+
+        def loss(y_true, y_pred):
+            # extract data
+            alpha = y_pred
+            dX = y_true
+
+            # compute log-likelihood
+            l = tf.reduce_sum(-alpha + tf.square(dX - mu * dt) *
+                              tf.exp(alpha) / dt)
+            return l
+
         return loss
 
     @staticmethod
@@ -170,6 +201,88 @@ class Loss(object):
 
         return loss
 
+    @staticmethod
+    def loss_xi_endo(dt, n_dim, n_varcov, mask_diagonal, W):
+        """
+        Loss function for the neural SDE model of xi (which is endogenous, i.e.
+        the drift and diffusion are only functions of xi, not S).
+
+        """
+
+        def loss(y_true, y_pred):
+            # get diffusion terms in the predicted values; in particular,
+            # diagonal terms of the diffusion matrix are taken exponentials
+            sigma_term = tf.transpose(
+                tf.where(tf.constant(mask_diagonal),
+                         tf.transpose(tf.exp(y_pred)), tf.transpose(y_pred)))[:,
+                         :n_varcov]
+
+            # construct the transposed diffusion matrix
+            sigma_tilde_T = tfp.math.fill_triangular(sigma_term, upper=True)
+
+            # get diagonal terms of the diffusion matrix
+            sigma_term_diagonal = tf.where(tf.constant(mask_diagonal),
+                                           tf.transpose(y_pred), 0.)
+
+            # get drift terms in the predicted values
+            mu_term = y_pred[:, n_varcov:]
+
+            # get pre-calculated terms from the inputs
+
+            ## regarding diffusion scaling
+            proj_dX = y_true[:, :n_dim]
+            Omega = tf.reshape(y_true[:, n_dim:n_dim + n_dim ** 2],
+                               shape=[-1, n_dim, n_dim])
+            det_Omega = y_true[:, n_dim + n_dim ** 2:n_dim + n_dim ** 2 + 1]
+            n1 = n_dim + n_dim ** 2 + 1
+
+            ## regarding drift correction
+            n_bdy = W.shape[0]
+            corr_dirs = tf.reshape(y_true[:, n1:n1 + n_dim * n_bdy],
+                                   shape=[-1, n_bdy, n_dim])
+            epsmu = y_true[:, n1 + n_dim * n_bdy:n1 + n_dim * n_bdy + n_bdy]
+
+            # compute corrected drifts
+
+            ## compute weights assigned to each correction direction
+            mu_tilde_inner_W = tf.matmul(
+                mu_term, tf.constant(W.T, dtype=tf.float32))
+            corr_dir_inner_W = tf.reduce_sum(
+                corr_dirs * tf.constant(W, dtype=tf.float32), axis=-1)
+            gamma = tf.maximum(-mu_tilde_inner_W - epsmu, 0.) / corr_dir_inner_W
+
+            ## compute corrected drift
+            mu_tf = mu_term + tf.reduce_sum(
+                tf.expand_dims(gamma, axis=-1) * corr_dirs, axis=1)
+            mu_tf = tf.expand_dims(mu_tf, axis=-1)
+
+            # compute log likelihood
+            Omega_T = tf.transpose(Omega, perm=[0, 2, 1])
+            sigma_tilde = tf.transpose(sigma_tilde_T, perm=[0, 2, 1])
+
+            proj_mu = tf.linalg.solve(Omega_T, mu_tf)
+            sol_mu = tf.linalg.triangular_solve(
+                sigma_tilde, proj_mu, lower=True)
+            sol_mu = tf.squeeze(sol_mu)
+
+            proj_dX_tf = tf.expand_dims(proj_dX, axis=-1)
+            sol_dX = tf.linalg.triangular_solve(
+                sigma_tilde, proj_dX_tf, lower=True)
+            sol_dX = tf.squeeze(sol_dX)
+
+            l1 = 2 * tf.reduce_sum(tf.math.log(det_Omega)) + \
+                 2 * tf.reduce_sum(sigma_term_diagonal)
+
+            l2 = 1. / dt * tf.reduce_sum(tf.square(sol_dX))
+
+            l3 = dt * tf.reduce_sum(tf.square(sol_mu))
+
+            l4 = -2 * tf.reduce_sum(sol_mu * sol_dX)
+
+            return l1 + l2 + l3 + l4
+
+        return loss
+
 
 class Model(object):
     """
@@ -178,10 +291,10 @@ class Model(object):
 
     @staticmethod
     def construct_S(dim_input, n_obs,
-                    pruning_sparsity, validation_split, batch_size, epochs):
+                    pruning_sparsity, validation_split, batch_size, epochs,
+                    dim_output=2):
 
         # construct the fully connected model
-        dim_output = 2
         model_S = tf.keras.Sequential([
             tf.keras.layers.Dense(128, input_shape=(dim_input,),
                                   activation=tf.nn.relu),
@@ -260,9 +373,11 @@ class Train(object):
 
     @staticmethod
     def train_S(X_S, Y_S,
-                pruning_sparsity=0.5, validation_split=0.1,
-                batch_size=512, epochs=500, rand_seed=0,
-                force_fit=False, model_name='model_S',
+                pruning_sparsity=0.5,
+                validation_split=0.1,
+                batch_size=512, epochs=500,
+                rand_seed=0, force_fit=False,
+                model_name='model_S',
                 out_dir='output/checkpoint/'):
 
         n_obs, dim_input = X_S.shape
@@ -326,10 +441,82 @@ class Train(object):
         return model_S
 
     @staticmethod
+    def train_lnS(X_lnS, Y_lnS, mu, dt,
+                  pruning_sparsity=0.5,
+                  validation_split=0.1,
+                  batch_size=512, epochs=1000,
+                  rand_seed=0, force_fit=False,
+                  model_name='model_lnS',
+                  out_dir='output/checkpoint/'):
+
+        n_obs, dim_input = X_lnS.shape
+        dim_output = 1
+
+        # construct the neural network model
+        model_lnS = Model.construct_S(
+            dim_input, n_obs,
+            pruning_sparsity, validation_split, batch_size, epochs, dim_output)
+
+        # compile the neural network model
+        model_lnS.compile(
+            loss=Loss.loss_lnS_const_drift(dt, mu),
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4)
+        )
+
+        # set up I/O
+        tag = out_dir + model_name + '_' + str(rand_seed)
+        checkpoint_filepath_model_S = tag
+        checkpoint_filepath_model_S_all = tag + '*'
+        csv_fname = tag + '_history.csv'
+
+        pruning_dir = out_dir + 'pruning_summary/'
+        if not os.path.exists(pruning_dir):
+            os.mkdir(pruning_dir)
+
+        # train the pruned model
+        tf.random.set_seed(rand_seed)
+        if glob(checkpoint_filepath_model_S_all) and not force_fit:
+            model_lnS.load_weights(checkpoint_filepath_model_S)
+        else:
+            model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+                filepath=checkpoint_filepath_model_S,
+                save_weights_only=True,
+                monitor='loss',
+                mode='min',
+                save_best_only=True)
+            csv_logger = tf.keras.callbacks.CSVLogger(
+                filename=csv_fname,
+                separator=',',
+                append=False
+            )
+
+            history = model_lnS.fit(
+                X_lnS, Y_lnS,
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=validation_split,
+                shuffle=True,
+                verbose=True,
+                callbacks=[
+                    model_checkpoint_callback,
+                    csv_logger,
+                    tfmot.sparsity.keras.UpdatePruningStep(),
+                    tfmot.sparsity.keras.PruningSummaries(log_dir=pruning_dir)]
+            )
+
+            # plot training loss history
+            plot_fname = tag + '_history.png'
+            utils.PlotLib.plot_loss_over_epochs(history, True, plot_fname)
+
+        return model_lnS
+
+    @staticmethod
     def train_mu(X_S, mu_base,
-                 validation_split=0.1, batch_size=512,
-                 epochs=200, rand_seed=0, force_fit=False,
-                 model_name='model_mu', out_dir='output/checkpoint/'):
+                 validation_split=0.1,
+                 batch_size=512, epochs=200,
+                 rand_seed=0, force_fit=False,
+                 model_name='model_mu',
+                 out_dir='output/checkpoint/'):
 
         dim_input = X_S.shape[1]
 
@@ -378,9 +565,11 @@ class Train(object):
     @staticmethod
     def train_xi(X_xi, Y_xi, W, G,
                  lbd_penalty_eq, lbd_penalty_sz,
-                 pruning_sparsity=0.5, validation_split=0.1,
-                 batch_size=512, epochs=20000, rand_seed=0,
-                 force_fit=False, model_name='model_xi',
+                 pruning_sparsity=0.5,
+                 validation_split=0.1,
+                 batch_size=512, epochs=20000,
+                 rand_seed=0, force_fit=False,
+                 model_name='model_xi',
                  out_dir='output/checkpoint/'):
 
         n_bdy, n_dim = W.shape
@@ -445,8 +634,77 @@ class Train(object):
         return model_xi_pruning
 
     @staticmethod
-    def predict_in_sample_model_xi(model_xi, X_xi, Y_xi, W, G):
-        n_dim = X_xi.shape[1] - 1
+    def train_xi_endo(X_xi, Y_xi, W, dt,
+                      pruning_sparsity=0.5,
+                      validation_split=0.1,
+                      batch_size=512, epochs=20000,
+                      rand_seed=0, force_fit=False,
+                      model_name='model_xi',
+                      out_dir='output/checkpoint/'):
+
+        n_bdy, n_dim = W.shape
+        n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_dim)
+
+        # construct the neural network model
+        model_xi_pruning = Model.construct_xi(
+            n_dim, n_dim + n_varcov, X_xi.shape[0],
+            pruning_sparsity, validation_split, batch_size, epochs)
+
+        model_xi_pruning.compile(
+            loss=Loss.loss_xi_endo(dt, n_dim, n_varcov, mask_diagonal, W),
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+        )
+
+        # set up I/O
+        tag = out_dir + model_name + '_' + str(rand_seed)
+        checkpoint_filepath = tag
+        checkpoint_filepath_all = tag + '*'
+        csv_fname = tag + '_history.csv'
+
+        pruning_dir = out_dir + 'pruning_summary/'
+        if not os.path.exists(pruning_dir):
+            os.mkdir(pruning_dir)
+
+        # train the pruned model
+        tf.random.set_seed(rand_seed)
+        if glob(checkpoint_filepath_all) and not force_fit:
+            model_xi_pruning.load_weights(checkpoint_filepath)
+        else:
+            model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+                filepath=checkpoint_filepath,
+                save_weights_only=True,
+                monitor='loss',
+                mode='min',
+                save_best_only=True)
+            csv_logger = tf.keras.callbacks.CSVLogger(
+                filename=csv_fname,
+                separator=',',
+                append=False
+            )
+
+            history = model_xi_pruning.fit(
+                X_xi, Y_xi,
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=validation_split,
+                shuffle=True,
+                verbose=True,
+                callbacks=[
+                    model_checkpoint_callback,
+                    csv_logger,
+                    tfmot.sparsity.keras.UpdatePruningStep(),
+                    tfmot.sparsity.keras.PruningSummaries(log_dir=pruning_dir)]
+            )
+
+            # plot training loss history
+            plot_fname = tag + '_history.png'
+            utils.PlotLib.plot_loss_over_epochs(history, True, plot_fname)
+
+        return model_xi_pruning
+
+    @staticmethod
+    def predict_in_sample_model_xi(model_xi, X_xi, Y_xi, W, endo=False):
+        n_dim = X_xi.shape[1] if endo else X_xi.shape[1] - 1
         n_bdy = W.shape[0]
 
         n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_dim)
@@ -461,9 +719,6 @@ class Train(object):
         sigma_term = sigma_term[:, :n_varcov]
         sigma_tilde_T = Train._fill_triu(sigma_term, n_dim)
 
-        # get drift terms
-        mu_residuals = y_pred_nn[:, n_varcov:]
-
         # get inputs for scaling diffusions and correcting drifts
         ## regarding diffusions
         Omega = np.reshape(Y_xi[:, n_dim:n_dim+n_dim**2],
@@ -474,11 +729,14 @@ class Train(object):
                                newshape=[-1, n_bdy, n_dim])
         epsmu = Y_xi[:, n1+n_dim*n_bdy:n1+n_dim*n_bdy+n_bdy]
 
-        n2 = n1+n_dim*n_bdy+n_bdy
-        mu_base = Y_xi[:, n2:n2+n_dim]
-
         # compute drift term
-        mu_tilde = mu_base * mu_residuals
+        if endo:
+            mu_tilde = y_pred_nn[:, n_varcov:]
+        else:
+            mu_residuals = y_pred_nn[:, n_varcov:]
+            n2 = n1 + n_dim * n_bdy + n_bdy
+            mu_base = Y_xi[:, n2:n2 + n_dim]
+            mu_tilde = mu_base * mu_residuals
 
         # scale diffusion
         sigma_T = np.matmul(sigma_tilde_T, Omega)
@@ -673,17 +931,257 @@ class Simulate(object):
         return st, xit, mus_sim, vols_sim
 
     @staticmethod
+    def simulate_lnS_lite(dt, N, model_S, S0, xit, mu=None):
+
+        # simulate innovations
+        dW = np.random.normal(0, np.sqrt(dt), (1, N + 1))
+
+        # initialise
+        st = np.ones(N + 1) * np.nan
+        st[0] = S0
+
+        for i in tqdm(range(1, N + 1)):
+
+            try:
+                xi = xit[:, i - 1]
+
+                # get drift and diffusion of S
+                x_S = xi
+                pred_S = model_S.predict(x_S.reshape(1, -1))[0]
+                vol_S = np.exp(-0.5 * pred_S[0])
+
+                if mu is not None:
+                    mu_S = mu
+                else:
+                    mu_S = pred_S[1]
+
+                # simulate S
+                lnS_ = np.log(st[i - 1]) + mu_S * dt + vol_S * dW[-1, i]
+                S_ = np.exp(lnS_)
+
+                st[i] = S_
+
+            except:
+
+                break
+
+        return st
+
+    @staticmethod
+    def simulate_xi_lite(dt, N, model_xi,
+                         X0, W, b,
+                         dist_multiplier, proj_scale,
+                         rho_star, epsmu_star, X_interior, reflect=False):
+
+        # simulate innovations
+        n_dim = X0.shape[0]
+        dW = np.random.normal(0, np.sqrt(dt), (n_dim, N + 1))
+
+        # initialise
+        xit = np.ones((n_dim, N + 1)) * np.nan
+        xit[:, 0] = X0
+
+        mus_sim = []
+        vols_sim = []
+
+        n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_dim)
+        n_reflect = 0
+
+        for i in tqdm(range(1, N + 1)):
+
+            try:
+                xi = xit[:, i - 1]
+
+                # get drift and diffusion of xi
+                x_xi = xi
+                gamma_nn = model_xi.predict(x_xi.reshape(1, -1))[0]
+                gamma_nn[np.array(mask_diagonal).ravel()] = np.exp(
+                    gamma_nn[np.array(mask_diagonal).ravel()])
+
+                sigma_term = gamma_nn[:n_varcov]
+                xc = np.concatenate([sigma_term, sigma_term[n_dim:][::-1]])
+                g = np.reshape(xc, [n_dim, n_dim])
+                sigma_tilde = np.triu(g, k=0).T
+
+                mu_tilde = gamma_nn[n_varcov:]
+
+                # scale diffusion and correct drift
+                mu, mat_vol = Simulate.scale_drift_diffusion(
+                    xi, mu_tilde, sigma_tilde, W, b,
+                    dist_multiplier, proj_scale,
+                    rho_star, epsmu_star, X_interior, mu_base=None)
+
+                # tame coefficients
+                mu_norm = 1. + np.linalg.norm(mu) * np.sqrt(dt)
+                vol_norm = 1. + np.linalg.norm(mat_vol) * np.sqrt(dt)
+
+                # simulate xi using Euler-scheme
+                xi_ = xi + mu / mu_norm * dt + \
+                      mat_vol.dot(
+                          dW[:, i].reshape((-1, 1))).flatten() / vol_norm
+
+                if reflect:
+                    if np.any(W.dot(xi_) - b < 0):
+                        n_reflect += 1
+                        print(f'Reflect simulated data point at index {i}.')
+                        xi_ = Simulate.reflect_data(xi, xi_, W, b)
+
+                xit[:, i] = xi_
+
+                mus_sim.append(mu)
+                vols_sim.append(mat_vol)
+
+            except:
+
+                break
+
+        return xit, mus_sim, vols_sim, n_reflect
+
+    @staticmethod
+    def simulate_xi_S_scenario_histshocks(dt, n_timestep,
+                                          model_xi, model_S, S0, X0, mu_S, W, b,
+                                          ls_dW_xi_S,
+                                          dist_multiplier, proj_scale,
+                                          rho_star, epsmu_star, X_interior):
+
+        n_factor_pri = X0.shape[0]
+        n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_factor_pri)
+
+        dW_xi_S = ls_dW_xi_S[0]
+
+        # get drift and diffusion of xi
+        x_xi = X0
+        gamma_nn = model_xi.predict(x_xi.reshape(1, -1))[0]
+        gamma_nn[np.array(mask_diagonal).ravel()] = np.exp(
+            gamma_nn[np.array(mask_diagonal).ravel()])
+
+        sigma_term = gamma_nn[:n_varcov]
+        xc = np.concatenate([sigma_term, sigma_term[n_factor_pri:][::-1]])
+        g = np.reshape(xc, [n_factor_pri, n_factor_pri])
+        sigma_tilde = np.triu(g, k=0).T
+
+        mu_tilde = gamma_nn[n_varcov:]
+
+        # scale diffusion and correct drift
+        mu, mat_vol = Simulate.scale_drift_diffusion(
+            x_xi, mu_tilde, sigma_tilde, W, b,
+            dist_multiplier, proj_scale,
+            rho_star, epsmu_star, X_interior, mu_base=None)
+
+        # tame coefficients
+        mu_norm = 1. + np.linalg.norm(mu) * np.sqrt(dt)
+        vol_norm = 1. + np.linalg.norm(mat_vol) * np.sqrt(dt)
+
+        xi_sim_deterministic = x_xi + mu / mu_norm * dt
+        xi_sim_random = (mat_vol.dot(dW_xi_S[:, :n_factor_pri].T)).T / vol_norm
+
+        xi_scenario = xi_sim_random + xi_sim_deterministic[None, :]
+
+        # get drift and diffusion of S
+        x_S = X0
+        pred_S = model_S.predict(x_S.reshape(1, -1))[0]
+        vol_S = np.exp(-0.5 * pred_S[0])
+
+        lnS_sim_deterministic = np.log(S0) + mu_S * dt
+        lnS_sim_random = vol_S * dW_xi_S[:, n_factor_pri]
+        lnS_scenario = lnS_sim_random + lnS_sim_deterministic
+
+        S_scenario = np.exp(lnS_scenario)
+
+        if n_timestep > 1:
+
+            for i_timestep in range(1, n_timestep):
+                print(f'Forward simulate primary factors and S '
+                      f'step {i_timestep + 1}.')
+
+                # get historical innovations
+                dW_xi_S = ls_dW_xi_S[i_timestep]
+
+                # remove scenario outliers
+                mask_outlier = False
+                range_xi_pri = np.array(
+                    [[0.08123201, 0.06227693], [-0.01876799, -0.03772307]])
+                for i in range(n_factor_pri):
+                    mask_outlier |= xi_scenario[:, i] > range_xi_pri[0, i]
+                    mask_outlier |= xi_scenario[:, i] < range_xi_pri[1, i]
+
+                n_outlier = np.sum(mask_outlier)
+
+                idxs_rpl_outlier = np.random.choice(np.where(~mask_outlier)[0],
+                                                    n_outlier, replace=False)
+                xi_scenario[mask_outlier] = xi_scenario[idxs_rpl_outlier]
+                print(f'Remove {np.sum(mask_outlier)} outliers.')
+
+                # simulate S
+                x_S = xi_scenario.copy()
+                pred_S = model_S.predict(x_S).ravel()
+                vol_S = np.exp(-0.5 * pred_S)
+
+                lnS_sim_deterministic = lnS_scenario + mu_S * dt
+                lnS_sim_random = vol_S * dW_xi_S[:, n_factor_pri]
+                lnS_scenario = lnS_sim_random + lnS_sim_deterministic
+
+                S_scenario = np.exp(lnS_scenario)
+
+                # simulate xi
+                x_xi = xi_scenario.copy()
+                gamma_nn = model_xi.predict(x_xi)
+                gamma_nn[:, np.array(mask_diagonal).ravel()] = np.exp(
+                    gamma_nn[:, np.array(mask_diagonal).ravel()])
+
+                sigma_term = gamma_nn[:, :n_varcov]
+                xc = np.concatenate(
+                    [sigma_term, sigma_term[:, n_factor_pri:][:, ::-1]], axis=1)
+                g = np.reshape(xc, [-1, n_factor_pri, n_factor_pri])
+                sigma_tilde = np.triu(g, k=0)
+
+                mu_tilde = gamma_nn[:, n_varcov:]
+
+                mu, mat_vol = Simulate.scale_drift_diffusion_vector(
+                    x_xi, mu_tilde, sigma_tilde, W, b,
+                    dist_multiplier, proj_scale, rho_star, epsmu_star,
+                    X_interior)
+
+                # tame coefficients
+                mu_norm = 1. + np.linalg.norm(mu, axis=1) * np.sqrt(dt)
+                vol_norm = 1. + np.linalg.norm(mat_vol, axis=(1, 2)) * np.sqrt(
+                    dt)
+
+                xi_sim_deterministic = x_xi + mu / mu_norm[:, None] * dt
+                xi_sim_random = np.squeeze(np.matmul(
+                    mat_vol, np.expand_dims(dW_xi_S[:, :n_factor_pri],
+                                            axis=-1))) / vol_norm[:, None]
+
+                xi_scenario = xi_sim_random + xi_sim_deterministic
+
+        return xi_scenario, S_scenario
+
+    @staticmethod
+    def simulate_xi_sec_scenario_histshocks(
+            n_timestep, X0, arr_xi3_const, arr_xi3_coeff, ls_dW_xi_sec):
+
+        xi_sec = X0
+        dW_xi_sec = ls_dW_xi_sec[0]
+        xi_sec_scenario = arr_xi3_const[None, :] + \
+                          (xi_sec * arr_xi3_coeff)[None, :] + dW_xi_sec
+
+        if n_timestep > 1:
+            for i_timestep in range(1, n_timestep):
+                print(f'Forward simulate secondary factors '
+                      f'step {i_timestep + 1}.')
+                dW_xi_sec = ls_dW_xi_sec[i_timestep]
+                xi_sec_scenario = arr_xi3_const[None, :] + \
+                                  xi_sec_scenario * arr_xi3_coeff[None, :] + \
+                                  dW_xi_sec
+
+        return xi_sec_scenario
+
+    @staticmethod
     def scale_drift_diffusion(x, mu_residual, sigma_tilde, W, b,
                               dist_multiplier, proj_scale,
                               rho_star, epsmu_star, x_interior, mu_base):
         """
         Scale the drift and diffusion functions.
-
-        Parameters
-        __________
-
-        Returns
-        _______
 
         """
 
@@ -714,7 +1212,10 @@ class Simulate(object):
 
         # scale the drifts
         ## compute drift
-        mu_tilde = mu_base * mu_residual
+        if mu_base is None:
+            mu_tilde = mu_residual
+        else:
+            mu_tilde = mu_base * mu_residual
         ## compute correction directions
         corr_dirs_x = x_interior - x[None, :]
         epsmu_x = PrepTrainData.normalise_dist_drift(
@@ -726,6 +1227,65 @@ class Simulate(object):
 
         ## compute the corrected drift
         mu = mu_tilde + np.sum(corr_dirs_x * weights_corr_dir[:, None], axis=0)
+
+        return mu, mat_vol
+
+    @staticmethod
+    def scale_drift_diffusion_vector(x, mu_tilde, sigma_tilde, W, b,
+                                     dist_multiplier, proj_scale,
+                                     rho_star, epsmu_star, x_interior):
+        """
+        Scale the drift and diffusion functions (vectorised version).
+
+        """
+
+        # vectorized qr function
+        vec_qr = np.vectorize(np.linalg.qr, signature='(m,n)->(m,p),(p,n)')
+
+        n_dim = W.shape[1]
+
+        # calculate the distance of the data point to each boundary
+        dist_x = np.abs(W.dot(x.T) - b[:, None]) / np.linalg.norm(W, axis=1)[:,
+                                                   None]
+        dist_x = dist_x.T
+
+        # calculate the normalised distance indicators
+        epsilon_sigma = PrepTrainData.normalise_dist_diffusion(
+            dist_x, dist_multiplier, proj_scale)
+
+        # sort by distance and get first n_dim closest ones
+        idxs_sorted_eps = np.argsort(epsilon_sigma, axis=1)
+        idxs_used_eps = idxs_sorted_eps[:, :n_dim]
+        Wd = W[idxs_used_eps]
+        ed = np.choose(idxs_used_eps[:, 0], epsilon_sigma.T)
+        for i_dim in range(1, n_dim):
+            ed = np.vstack(
+                (ed, np.choose(idxs_used_eps[:, i_dim], epsilon_sigma.T)))
+        epsilond_sigma = ed.T
+
+        # scale the diffusions
+        V = np.transpose(vec_qr(np.transpose(Wd, axes=[0, 2, 1]))[0],
+                         axes=[0, 2, 1])
+        Omega = V * np.sqrt(epsilond_sigma)[:, :, None]
+
+        mat_a_half = np.matmul(np.transpose(Omega, axes=[0, 2, 1]), sigma_tilde)
+        mat_a = np.matmul(mat_a_half, np.transpose(mat_a_half, axes=[0, 2, 1]))
+
+        mat_vol = np.linalg.cholesky(mat_a)
+
+        # scale the drifts
+        ## compute correction directions
+        corr_dirs_x = x_interior[None, :, :] - np.expand_dims(x, axis=1)
+        epsmu_x = PrepTrainData.normalise_dist_drift(
+            dist_x, rho_star, epsmu_star)
+        mu_tilde_inner_W = mu_tilde.dot(W.T)
+        corr_dir_inner_W = np.sum(corr_dirs_x * W[None, :, :], axis=-1)
+        weights_corr_dir = np.maximum(- mu_tilde_inner_W - epsmu_x,
+                                      0.) / corr_dir_inner_W
+
+        # ## compute the corrected drift
+        mu = mu_tilde + np.sum(weights_corr_dir[:, :, None] * corr_dirs_x,
+                               axis=1)
 
         return mu, mat_vol
 

@@ -4,7 +4,7 @@ Utility methods, including:
   - Library of plot methods
 """
 
-# Copyright 2021 Sheng Wang.
+# Copyright 2022 Sheng Wang.
 # Affiliation: Mathematical Institute, University of Oxford
 # Email: sheng.wang@maths.ox.ac.uk
 
@@ -53,6 +53,37 @@ class Config(object):
         'factor_multiplier': 250,
         'lbd_penalty_eq': 0,
         'lbd_penalty_sz': 0,
+    }
+
+
+class ConfigOm(object):
+    """
+    Library of hyperparameters (for OptionMetrics data).
+    """
+
+    hp_sde_transform = {
+        'norm_factor_pri': .1,
+        'norm_factor_sec': .05,
+        'frac_critical_threshold': 0.9,
+        'critical_value': 0.95,
+        'proj_scale': 1,
+        'rho_star': 1e-4,
+        'epsmu_star': 10
+    }
+
+    hp_model_lnS = {
+        'pruning_sparsity': .5,
+        'validation_split': .1,
+        'batch_size': 512,
+        'epochs': 1000
+    }
+
+    hp_model_xi = {
+        'pruning_sparsity': .5,
+        'validation_split': .1,
+        'batch_size': 512,
+        'epochs': 20000,
+        'factor_multiplier': 250
     }
 
 
@@ -193,6 +224,81 @@ class PlotLib(object):
         plt.tight_layout()
 
     @staticmethod
+    def plot_xi_drift_diffusion_om(X, mu, sigma_L, n_plot_points, W, b,
+                                   mu_scale=1 * 1e-4, sigma_scale=7 * 1e-2,
+                                   sigma_hw_relative_scale=1. / 2,
+                                   plot_fname=None):
+
+        n_obs = X.shape[0]
+
+        # randomly sample a few data points
+        np.random.seed(9)
+        idxs_random = np.random.choice(range(n_obs), n_plot_points)
+
+        xi_rnd = X[idxs_random, :]
+        mu_rnd = mu[idxs_random, :]
+        sigma_rnd = sigma_L[idxs_random, :, :]
+
+        # create diffusion matrix ellipses
+        ells = []
+        for i in range(xi_rnd.shape[0]):
+            v = sigma_rnd[i]
+            evv, ev = np.linalg.eig(v.dot(v.T))
+
+            U1 = np.array(
+                (ev[0, 0] * sigma_scale * evv[0] ** sigma_hw_relative_scale))
+            V1 = np.array(
+                (ev[1, 0] * sigma_scale * evv[0] ** sigma_hw_relative_scale))
+            U2 = np.array(
+                (ev[0, 1] * sigma_scale * evv[1] ** sigma_hw_relative_scale))
+            V2 = np.array(
+                (ev[1, 1] * sigma_scale * evv[1] ** sigma_hw_relative_scale))
+
+            angle = V1 / U1 * 180 / np.pi
+            width = np.sqrt(U1 ** 2 + V1 ** 2)
+            height = np.sqrt(U2 ** 2 + V2 ** 2)
+            e = Ellipse(xy=(xi_rnd[i, 0], xi_rnd[i, 1]),
+                        width=width, height=height, angle=angle)
+            ells.append(e)
+
+        # plot
+        fig = plt.figure(figsize=(9, 3))
+
+        ax = fig.add_subplot(121)
+        ax.set_title('Drift')
+        ax.set_xlabel(r'$\xi_1$')
+        ax.set_ylabel(r'$\xi_2$')
+        ax.scatter(xi_rnd[:, 0], xi_rnd[:, 1],
+                   facecolors='green', edgecolors='green', s=20, alpha=.5)
+
+        PlotLib.__plot_bdy_om(W, b, ax)
+
+        for i in range(xi_rnd.shape[0]):
+            Xx = np.array((xi_rnd[i, 0]))
+            Y = np.array((xi_rnd[i, 1]))
+            U = np.array((mu_rnd[i, 0] * mu_scale))
+            V = np.array((mu_rnd[i, 1] * mu_scale))
+            ax.quiver(Xx, Y, U, V, units='xy', width=.0002, scale=.01, alpha=1)
+
+        ax = fig.add_subplot(122)
+        ax.set_title('Diffusion')
+        ax.set_xlabel(r'$\xi_1$')
+        ax.set_ylabel(r'$\xi_2$')
+        ax.scatter(xi_rnd[:, 0], xi_rnd[:, 1],
+                   facecolors='green', edgecolors='black', s=1, alpha=1)
+        PlotLib.__plot_bdy_om(W, b, ax)
+
+        for e in ells:
+            ax.add_artist(e)
+            e.set_clip_box(ax.bbox)
+            e.set_alpha(.5)
+
+        plt.tight_layout()
+        if plot_fname is not None:
+            plt.savefig(plot_fname, dpi=500)
+            plt.close()
+
+    @staticmethod
     def plot_simulated_xi(st, xit, X, plot_fname):
 
         fig = plt.figure(figsize=(12, 4))
@@ -285,6 +391,80 @@ class PlotLib(object):
         plt.tight_layout()
 
     @staticmethod
+    def plot_om2_timeseries(
+            headers, ls_securityid, ls_dates, ls_S, ls_C, Ts, med_ks):
+
+        fig = plt.figure(figsize=(10, 3.5))
+        g = GridSpec(2, 3, fig)
+        ax = fig.add_subplot(g[0, :2])
+        ax.set_title('Index price')
+        for i in range(len(ls_securityid)):
+            df = pd.DataFrame(ls_S[i], index=ls_dates[i],
+                              columns=[headers[i]])
+            df.index = pd.to_datetime(df.index)
+            df.plot(ax=ax, linewidth=1)
+        ax = fig.add_subplot(g[1, :2])
+        ax.set_title('1M ATM call option price (normalised)')
+        for i in range(len(ls_securityid)):
+            df = pd.DataFrame(ls_C[i][:, 8].T, index=ls_dates[i],
+                              columns=[headers[i]])
+            df.index = pd.to_datetime(df.index)
+            df.plot(ax=ax, linewidth=1)
+        ax = fig.add_subplot(g[:, 2])
+        ax.scatter(med_ks, Ts, s=3, color='k')
+        ax.set_xlabel(r'Relative moneyness $K/F(T)$')
+        ax.set_ylabel(r'Time-to-expiries')
+
+        plt.tight_layout()
+
+    @staticmethod
+    def plot_om2_factors(X, W, b):
+        import pypoman
+        from scipy.spatial import ConvexHull
+
+        fig = plt.figure(figsize=(9, 3))
+        ax = fig.add_subplot(111)
+
+        # plot scattergram of factors
+        ax.scatter(X[:, 0], X[:, 1], color='k', s=.05, alpha=.5)
+
+        # plot arbitrage boundaries
+        xs = np.linspace(-0.022, .095, 50)
+        for i in range(W.shape[0]):
+            wi = W[i]
+            bi = b[i]
+            ys = bi / wi[1] - wi[0] / wi[1] * xs
+            mask = (ys < 0.12) & (ys > -0.085)
+            ax.plot(xs[mask], ys[mask], '--r', linewidth=2)
+        ax.set_xlabel(r'$\xi_1$')
+        ax.set_ylabel(r'$\xi_2$')
+
+        # plot zoom-in
+        axins = ax.inset_axes([0.78, 0.03, 0.21, 0.47])
+        data_mask = X[:, 0] < -0.01
+        data_mask &= X[:, 1] > -0.01
+        axins.scatter(X[data_mask, 0], X[data_mask, 1], color='k', s=.05,
+                      alpha=.5)
+        xs = np.linspace(-0.021, -0.015, 100)
+        for i in range(W.shape[0]):
+            wi = W[i]
+            bi = b[i]
+            ys = bi / wi[1] - wi[0] / wi[1] * xs
+            mask = (ys < 0.035) & (ys > -0.005)
+            axins.plot(xs[mask], ys[mask], '--r', linewidth=2)
+        axins.set_xticks([])
+        axins.set_yticks([])
+        ax.indicate_inset_zoom(axins)
+
+        # fill color for the no-arbitrage region
+        vertices = np.array(pypoman.compute_polytope_vertices(-W, -b))
+        hull = ConvexHull(vertices)
+        ax.fill(vertices[hull.vertices, 0], vertices[hull.vertices, 1], 'green',
+                alpha=0.1)
+
+        plt.tight_layout()
+
+    @staticmethod
     def __plot_bdy(W, b, idxs_bdy_plot, ax):
         xs = np.linspace(-0.032, 0.01, 100)
         for i in idxs_bdy_plot:
@@ -293,3 +473,119 @@ class PlotLib(object):
             ys = bi/wi[1] - wi[0]/wi[1] * xs
             mask = (ys<0.06) & (ys>-0.03)
             ax.plot(xs[mask], ys[mask], '--r',linewidth=2)
+
+    @staticmethod
+    def __plot_bdy_om(W, b, ax):
+        xs = np.linspace(-0.022, 0.078, 100)
+        for i in range(W.shape[0]):
+            wi = W[i]
+            bi = b[i]
+            ys = bi / wi[1] - wi[0] / wi[1] * xs
+            mask = (ys < 0.045) & (ys > -0.024)
+            ax.plot(xs[mask], ys[mask], '--r', linewidth=2)
+
+
+class Finance(object):
+    """
+    Library of methods for computing various financial terms.
+    """
+
+    @staticmethod
+    def calc_normcallprice(sigma, T, m):
+        a = - m / sigma / np.sqrt(T)
+        b = 0.5 * sigma * np.sqrt(T)
+        v1 = sp.stats.norm.cdf(a + b)
+        v2 = sp.stats.norm.cdf(a - b) * np.exp(m)
+        return v1 - v2
+
+    @staticmethod
+    def calc_iv(c_tilde, T, m):
+        """
+        Calculate implied volatility from the normalised call price
+        """
+
+        def solve_iv(c_tilde, T, m):
+            def obj_func(sigma):
+                return Finance.calc_normcallprice(sigma, T, m) - c_tilde
+
+            return sp.optimize.brentq(obj_func, 1e-6, 1.)
+
+        iv = solve_iv(c_tilde, T, m)
+
+        return iv
+
+    @staticmethod
+    def calc_vix(k_arr, St, cs_ts, normc=True):
+        """
+        Calculate the CBOE VIX index.
+        """
+
+        # calculate Delta-k arrays
+        dk_arr = np.zeros_like(k_arr)
+        for i in range(len(dk_arr)):
+            if i == 0:
+                dk_arr[i] = k_arr[i + 1] - k_arr[i]
+            elif i == len(dk_arr) - 1:
+                dk_arr[i] = k_arr[i] - k_arr[i - 1]
+            else:
+                dk_arr[i] = 0.5 * (k_arr[i + 1] - k_arr[i - 1])
+
+        # only use the 30-day option prices
+        T1 = 30 / 365.25
+
+        if np.isscalar(St):
+            F = St
+            K_arr = k_arr * F
+            vs = cs_ts.copy()
+            if normc:
+                vs *= F
+            dK_arr = dk_arr * F
+
+            # caluclate OTM option prices using put-call parity
+            for i in range(vs.shape[0]):
+                if K_arr[i] < F:
+                    vs[i] = vs[i] - F + K_arr[i]
+
+            a1 = np.sum(dK_arr / K_arr ** 2 * vs) * 2 / T1
+            b1 = 0.01 ** 2 / T1
+            sigma1 = np.sqrt(a1 - b1)
+
+            # compute vix
+            vix = 100 * sigma1
+
+            return vix
+
+        ls_vix = []
+        for t in range(St.shape[0]):
+            F = St[t]
+            K_arr = k_arr * F
+            vs = cs_ts[t, :].copy()
+            if normc:
+                 vs *= F
+            dK_arr = dk_arr * F
+
+            # caluclate OTM option prices using put-call parity
+            for i in range(vs.shape[0]):
+                if K_arr[i] < F:
+                    vs[i] = vs[i] - F + K_arr[i]
+
+            a1 = np.sum(dK_arr / K_arr ** 2 * vs) * 2 / T1
+            b1 = 0.01 ** 2 / T1
+            sigma1 = np.sqrt(a1 - b1)
+
+            # compute vix
+            vix = 100 * sigma1
+
+            ls_vix.append(vix)
+
+        ls_vix = np.array(ls_vix)
+
+        return ls_vix
+
+    @staticmethod
+    def calc_var(pnl_scenario, confidence):
+        var_long, var_short = np.quantile(
+            pnl_scenario, [1 - confidence, confidence], axis=0)
+        var_long = np.minimum(var_long, 0)
+        var_short = np.maximum(var_short, 0)
+        return var_long, var_short

@@ -130,3 +130,9 @@ def load_hestonslv_data(fname):
 
     return St, vt, list_exp, list_mny, cs_ts_raw, cs_ts, mask_quality_value, \
            Ts, ks, mat_A, vec_b
+
+
+class DataOm:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
