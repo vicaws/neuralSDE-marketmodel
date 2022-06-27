@@ -13,10 +13,21 @@ Python modules and jupyter notebook examples for the following papers:
 ### Installation of pre-requisites
 
 It is recommended to create a new environment and install pre-requisite
-packages.
+packages. Here is an illustrative example of using [Conda](https://docs.conda.io/en/latest/)
+for setting up the virtual environment directly from the configuration file [mktmdl.yaml](mktmdl.yaml) 
+(thanks to [Prof. Matthew Dixon](http://mypages.iit.edu/~mdixon7/) for feedback):
 
 >```
->pip install -r requirements.txt
+>$git clone git@github.com:vicaws/neuralSDE-marketmodel.git
+>$cd neuralSDE-marketmodel
+>$conda env create -f mktmdl.yaml
+>$conda activate mktmdl
+>```
+
+Alternatively, one could pip install the pre-requisite packages from [requirements.txt](requirements.txt)
+using:
+>```
+>$pip install -r requirements.txt
 >```
 
 In addition, in this repository we also include our proprietary python package 
