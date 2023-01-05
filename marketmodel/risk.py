@@ -576,7 +576,7 @@ def gen_backtest_stats(confidence, ls_ts_pnl, ls_ts_var_long, ls_ts_var_short):
         ts_var_long = ls_ts_var_long[i]
         ts_var_short = ls_ts_var_short[i]
 
-        if  ts_pnl.ndim == 1:
+        if ts_pnl.ndim == 1:
             ls_ttp_short.append(np.min(ts_var_short) / np.max(ts_var_short))
             ls_ttp_long.append(np.max(ts_var_long) / np.min(ts_var_long))
         else:

@@ -550,7 +550,7 @@ class DecodeFactor(object):
         dX = np.delete(np.diff(xi, axis=0), idxs_remove, axis=0)
 
         S = np.delete(St[:-1], idxs_remove)
-        dS = np.delete(np.array(St[:-1]) - np.array(St[1:]), idxs_remove)
+        dS = np.delete(np.diff(np.log(St)), idxs_remove)
 
         # scale factors to the same max-min norm
         scales_X = norm_factor / (np.max(X, axis=0) - np.min(X, axis=0))
@@ -571,6 +571,68 @@ class DecodeFactor(object):
         b = b / norm_W
 
         return G_scaled, X_scaled, dX_scaled, S, dS, W, b, idxs_remove, scales_X
+
+    @staticmethod
+    def decode_factor_pcasa_om(cs_ts, mat_A, vec_b):
+        """
+        Decode one PCA factor and one static arbitrage factor in order for the
+        EURO STOXX 50 and DAX index option prices collected from OptionMetrix.
+        Our paper https://arxiv.org/abs/2205.15991 uses this decoding.
+
+        Parameters
+        __________
+        cs_ts: numpy.array, 2D, shape = (n_time, n_opt)
+            Time series of normalised call price surfaces.
+
+        mat_A: numpy.array, 2D, shape = (n_constraint, n_opt)
+            The coefficient matrix of static arbitrage constraints linear
+            inequalities.
+
+        vec_b: numpy.array, 1D, shape = (n_constraint, )
+            The right-hand-side constant vector term of static arbitrage
+            constraints linear inequalities.
+
+        Returns
+        _______
+        G: numpy.array, 2D, shape = (n_factor, n_opt)
+            Price basis vector.
+
+        pca_xi: numpy.array, 2D, shape = (n_time, n_factor)
+            Decoded factor data (unscaled).
+        """
+
+        # parameters
+        n_pca_factor = 1  # number of statistical accuracy factor
+        n_sa_factor = 1   # number of static arbitrage factor
+        n_PC = 4          # number of PC constituents for the sa factor
+        weights_ = np.array([[0.12001689, -0.57931713, 0.43636627, 0.18497003]])
+
+        # calculate the constant term G0
+        G0 = cs_ts.mean(axis=0)
+        res0 = cs_ts - G0[None, :]
+
+        # decode statistical accuracy factors
+        G_pca, xi_pca = DecodeFactor.decode_pca_factor(res0, n_pca_factor)
+        res1 = res0 - xi_pca.dot(G_pca)
+
+        # decode static arbitrage factors
+        rhs0 = vec_b - G0.dot(mat_A.T)
+        rhs1 = rhs0[:, None] - mat_A.dot(G_pca.reshape((-1, 1))). \
+            dot(xi_pca.reshape((1, -1)))
+
+        G_sa, xi_sa, weights = DecodeFactor.decode_stcarb_factor(
+            res1, n_sa_factor, n_PC, mat_A, rhs1, weights_)
+
+        # combine factors
+        Gx = np.vstack((G_pca, G_sa))
+        xi = np.hstack((xi_pca, xi_sa))
+        G = np.vstack((G0, Gx))
+
+        # orthogonalise factors
+        pca_xi = PCA(n_components=2)
+        pca_xi.fit(xi)
+
+        return G, pca_xi
 
     @staticmethod
     def decode_dynarb_factor(residuals, n_da_factor: int,

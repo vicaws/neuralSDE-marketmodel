@@ -283,6 +283,97 @@ class Loss(object):
 
         return loss
 
+    @staticmethod
+    def loss_xiS(dt, n_dim, n_varcov, mask_diagonal, W, W_bar):
+        """
+        Loss function for the joint neural SDE model of xi and lnS.
+        """
+
+        def loss(y_true, y_pred_):
+            # augment the NN-predicted value array
+            y_pred_l = y_pred_[:, :2]
+            y_pred_r = y_pred_[:, 2:]
+            paddings = tf.constant([[0, 0], [0, 1]])
+            y_pred_l = tf.pad(y_pred_l, paddings)
+            y_pred = tf.concat([y_pred_l, y_pred_r], axis=1)
+
+            # get diffusion terms in the predicted values; in particular,
+            # diagonal terms of the diffusion matrix are taken exponentials
+            sigma_term = tf.transpose(
+                tf.where(tf.constant(mask_diagonal),
+                         tf.transpose(tf.exp(y_pred)), tf.transpose(y_pred)))[:,
+                         :n_varcov]
+
+            # construct the transposed diffusion matrix
+            sigma_tilde_T = tfp.math.fill_triangular(sigma_term, upper=True)
+
+            # get diagonal terms of the diffusion matrix
+            sigma_term_diagonal = tf.where(tf.constant(mask_diagonal),
+                                           tf.transpose(y_pred), 0.)
+
+            # get drift terms in the predicted values
+            mu_S = tf.expand_dims(y_true[:, -1], axis=1)
+            mu_term = tf.concat([mu_S, y_pred[:, n_varcov:]], axis=1)
+
+            # get pre-calculated terms from the inputs
+            ## regarding diffusion scaling
+            proj_dX = y_true[:, :n_dim]
+            Omega = tf.reshape(y_true[:, n_dim:n_dim + n_dim ** 2],
+                               shape=[-1, n_dim, n_dim])
+            det_Omega = y_true[:, n_dim + n_dim ** 2:n_dim + n_dim ** 2 + 1]
+            n1 = n_dim + n_dim ** 2 + 1
+
+            ## regarding drift correction
+            n_bdy = W.shape[0]
+            corr_dirs = tf.reshape(y_true[:, n1:n1 + (n_dim - 1) * n_bdy],
+                                   shape=[-1, n_bdy, n_dim - 1])
+            epsmu = y_true[:,
+                    n1 + (n_dim - 1) * n_bdy:n1 + (n_dim - 1) * n_bdy + n_bdy]
+
+            # compute corrected drifts
+            ## compute weights assigned to each correction direction
+            mu_tilde_inner_W = tf.matmul(
+                mu_term, tf.constant(W_bar.T, dtype=tf.float32))  # mu * W_bar
+
+            corr_dir_inner_W = tf.reduce_sum(
+                corr_dirs * tf.constant(W, dtype=tf.float32), axis=-1)
+            gamma = tf.maximum(-mu_tilde_inner_W - epsmu, 0.) / corr_dir_inner_W
+
+            ## compute corrected drift
+            paddings = tf.constant([[0, 0], [1, 0]])
+            mu_correction = tf.reduce_sum(
+                tf.expand_dims(gamma, axis=-1) * corr_dirs, axis=1)
+            mu_correction = tf.pad(mu_correction, paddings, 'CONSTANT')
+            mu_tf = mu_term + mu_correction
+            mu_tf = tf.expand_dims(mu_tf, axis=-1)
+
+            # compute log likelihood
+            Omega_T = tf.transpose(Omega, perm=[0, 2, 1])
+            sigma_tilde = tf.transpose(sigma_tilde_T, perm=[0, 2, 1])
+
+            proj_mu = tf.linalg.solve(Omega_T, mu_tf)
+            sol_mu = tf.linalg.triangular_solve(
+                sigma_tilde, proj_mu, lower=True)
+            sol_mu = tf.squeeze(sol_mu)
+
+            proj_dX_tf = tf.expand_dims(proj_dX, axis=-1)
+            sol_dX = tf.linalg.triangular_solve(
+                sigma_tilde, proj_dX_tf, lower=True)
+            sol_dX = tf.squeeze(sol_dX)
+
+            l1 = 2 * tf.reduce_sum(tf.math.log(det_Omega)) + \
+                 2 * tf.reduce_sum(sigma_term_diagonal)
+
+            l2 = 1. / dt * tf.reduce_sum(tf.square(sol_dX))
+
+            l3 = dt * tf.reduce_sum(tf.square(sol_mu))
+
+            l4 = -2 * tf.reduce_sum(sol_mu * sol_dX)
+
+            return l1 + l2 + l3 + l4
+
+        return loss
+
 
 class Model(object):
     """
@@ -703,6 +794,76 @@ class Train(object):
         return model_xi_pruning
 
     @staticmethod
+    def train_xiS(X_xiS, Y_xiS, W, W_bar, dt,
+                  pruning_sparsity=0.5,
+                  validation_split=0.1,
+                  batch_size=512, epochs=20000,
+                  rand_seed=0, force_fit=False,
+                  model_name='model_xiS',
+                  out_dir='output/checkpoint/'):
+
+        n_obs, n_factor_pri = X_xiS.shape
+        n_dim = n_factor_pri + 1  # the extra dimension for S
+        n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_dim)
+
+        mask_diagonal = mask_diagonal[:-1]
+
+        # construct the neural network model
+        dim_input = n_factor_pri
+        dim_output = (n_dim - 1) + (n_varcov - 1)
+        model_xi_pruning = Model.construct_xi(
+            dim_input, dim_output, n_obs,
+            pruning_sparsity, validation_split, batch_size, epochs)
+
+        model_xi_pruning.compile(
+            loss=Loss.loss_xiS(
+                dt, n_dim, n_varcov, mask_diagonal, W, W_bar),
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+        )
+
+        # set up I/O
+        tag = out_dir + model_name + '_' + str(rand_seed)
+        checkpoint_filepath = tag
+        checkpoint_filepath_all = tag + '*'
+        csv_fname = tag + '_history.csv'
+
+        # train the pruned model
+        tf.random.set_seed(rand_seed)
+        if glob(checkpoint_filepath_all) and not force_fit:
+            model_xi_pruning.load_weights(checkpoint_filepath)
+        else:
+            model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+                filepath=checkpoint_filepath,
+                save_weights_only=True,
+                monitor='loss',
+                mode='min',
+                save_best_only=True)
+            csv_logger = tf.keras.callbacks.CSVLogger(
+                filename=csv_fname,
+                separator=',',
+                append=False
+            )
+
+            history = model_xi_pruning.fit(
+                X_xiS, Y_xiS,
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=validation_split,
+                shuffle=True,
+                verbose=True,
+                callbacks=[
+                    model_checkpoint_callback,
+                    csv_logger,
+                    tfmot.sparsity.keras.UpdatePruningStep()]
+            )
+
+            # plot training loss history
+            plot_fname = tag + '_history.png'
+            utils.PlotLib.plot_loss_over_epochs(history, True, plot_fname)
+
+        return model_xi_pruning
+
+    @staticmethod
     def predict_in_sample_model_xi(model_xi, X_xi, Y_xi, W, endo=False):
         n_dim = X_xi.shape[1] if endo else X_xi.shape[1] - 1
         n_bdy = W.shape[0]
@@ -746,6 +907,69 @@ class Train(object):
         corr_dir_inner_W = np.sum(corr_dirs * W[None, :, :], axis=-1)
         gamma = np.maximum(- mu_tilde_inner_W - epsmu, 0.) / corr_dir_inner_W
         mu = mu_tilde + np.sum(gamma[:, :, None] * corr_dirs, axis=1)
+
+        # LU deconposition of diffusion matrices
+        mat_cov = np.matmul(np.transpose(sigma_T, axes=[0, 2, 1]), sigma_T)
+        sigma_L = np.linalg.cholesky(mat_cov)
+
+        return mu_tilde, sigma_tilde_T, mu, sigma_T, sigma_L
+
+    @staticmethod
+    def predict_in_sample_model_xiS(
+            model_xiS, X_xiS, Y_xiS, W, W_bar, mu_S=None, restrictive=False):
+        n_obs, n_factor_pri = X_xiS.shape
+        n_dim = n_factor_pri + 1  # the extra dimension for S
+        n_varcov, mask_diagonal = Train._identify_diagonal_entries(n_dim)
+
+        # predict underlying functions using the learnt NN
+        y_pred_nn = model_xiS.predict(X_xiS)
+
+        if restrictive:
+            y_pred_nn_l = y_pred_nn[:, :2]
+            y_pred_nn_r = y_pred_nn[:, 2:]
+            y_pred_nn_l = np.pad(y_pred_nn_l, [[0, 0], [0, 1]])
+            y_pred_nn = np.hstack((y_pred_nn_l, y_pred_nn_r))
+
+        # get diffusion terms
+        mask_diagonal_np = [m[0] for m in mask_diagonal]
+        if mu_S is not None:
+            mask_diagonal_np = mask_diagonal_np[:-1]
+        sigma_term = y_pred_nn.copy()
+        sigma_term[:, mask_diagonal_np] = np.exp(
+            sigma_term[:, mask_diagonal_np])
+        sigma_term = sigma_term[:, :n_varcov]
+        sigma_tilde_T = Train._fill_triu(sigma_term, n_dim)
+
+        # get drift terms
+        mu_tilde = y_pred_nn[:, n_varcov:]
+        if mu_S is not None:
+            if np.isscalar(mu_S):
+                mu_tilde = np.hstack((np.ones((n_obs, 1)) * mu_S, mu_tilde))
+            else:
+                mu_tilde = np.hstack((mu_S, mu_tilde))
+
+        # get inputs for scaling diffusions and correcting drifts
+        ## regarding diffusions
+        Omega = np.reshape(Y_xiS[:, n_dim:n_dim + n_dim ** 2],
+                           newshape=[-1, n_dim, n_dim])
+        ## regarding drifts
+        n_bdy = W.shape[0]
+        n1 = n_dim + n_dim ** 2 + 1
+        corr_dirs = np.reshape(Y_xiS[:, n1:n1 + (n_dim - 1) * n_bdy],
+                               newshape=[-1, n_bdy, n_dim - 1])
+        epsmu = Y_xiS[:,
+                n1 + (n_dim - 1) * n_bdy:n1 + (n_dim - 1) * n_bdy + n_bdy]
+
+        # scale diffusion
+        sigma_T = np.matmul(sigma_tilde_T, Omega)
+
+        # correct drift
+        mu_tilde_inner_W = mu_tilde.dot(W_bar.T)
+        corr_dir_inner_W = np.sum(corr_dirs * W[None, :, :], axis=-1)
+        gamma = np.maximum(- mu_tilde_inner_W - epsmu, 0.) / corr_dir_inner_W
+        mu_correction = np.sum(gamma[:, :, None] * corr_dirs, axis=1)
+        mu_correction = np.hstack((np.zeros((n_obs, 1)), mu_correction))
+        mu = mu_tilde + mu_correction
 
         # LU deconposition of diffusion matrices
         mat_cov = np.matmul(np.transpose(sigma_T, axes=[0, 2, 1]), sigma_T)
@@ -1290,6 +1514,53 @@ class Simulate(object):
         return mu, mat_vol
 
     @staticmethod
+    def scale_drift_diffusion_xiS(x, mu_tilde, sigma_tilde, W, W_bar, b,
+                                  dist_multiplier, proj_scale,
+                                  rho_star, epsmu_star, x_interior):
+
+        n_dim = W_bar.shape[1]
+
+        # calculate the distance of the data point to each boundary
+        dist_x = np.abs(W_bar.dot(x) - b) / np.linalg.norm(W_bar, axis=1)
+
+        # calculate the normalised distance indicators
+        epsilon_sigma = PrepTrainData.normalise_dist_diffusion(
+            dist_x, dist_multiplier, proj_scale)
+
+        # sort by distance and get first n_dim closest ones
+        idxs_sorted_eps = np.argsort(epsilon_sigma)
+        idxs_used_eps = idxs_sorted_eps[:n_dim]
+        Wd = W_bar[idxs_used_eps]
+        epsilond_sigma = epsilon_sigma[idxs_used_eps]
+
+        # scale the diffusions
+        if np.max(epsilond_sigma) < 1e-8:  # if the anchor point is on a corner
+            Omega = np.zeros((n_dim, n_dim))
+        else:  # if the anchor point is not on the corner
+            # compute new bases
+            V = np.linalg.qr(Wd.T)[0].T
+            Omega = np.diag(np.sqrt(epsilond_sigma)).dot(V)
+        mat_a = Omega.T.dot(sigma_tilde).dot(sigma_tilde.T).dot(Omega)
+        mat_vol = np.linalg.cholesky(mat_a)
+
+        # scale the drifts
+        ## compute correction directions
+        corr_dirs_x = x_interior - x[None, 1:]
+        epsmu_x = PrepTrainData.normalise_dist_drift(
+            dist_x, rho_star, epsmu_star)
+        mu_tilde_inner_W = W_bar.dot(mu_tilde)
+        corr_dir_inner_W = np.sum(corr_dirs_x * W, axis=-1)
+        weights_corr_dir = np.maximum(-mu_tilde_inner_W - epsmu_x, 0.) / \
+                           corr_dir_inner_W
+
+        ## compute the corrected drift
+        mu_correction = np.sum(corr_dirs_x * weights_corr_dir[:, None], axis=0)
+        mu_correction = np.hstack((0., mu_correction))
+        mu = mu_tilde + mu_correction
+
+        return mu, mat_vol
+
+    @staticmethod
     def reflect_data(x0, x1, W, b):
 
         mask_arb = W.dot(x1) - b < 0
@@ -1329,3 +1600,5 @@ class Simulate(object):
         else:
 
             return x1
+
+

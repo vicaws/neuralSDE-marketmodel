@@ -10,6 +10,7 @@ Utility methods, including:
 
 import numpy as np
 import pandas as pd
+import scipy as sp
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -589,3 +590,39 @@ class Finance(object):
         var_long = np.minimum(var_long, 0)
         var_short = np.maximum(var_short, 0)
         return var_long, var_short
+
+    @staticmethod
+    def calc_normc_derivatives_bs(ivs_ts, Ts, ms):
+        """
+        Calculate partial derivatives of the normalised call prices
+        """
+
+        ls_dc_dm_bs = np.zeros_like(ivs_ts)
+        ls_d2c_dm2_bs = np.zeros_like(ivs_ts)
+        ls_dc_dT_bs = np.zeros_like(ivs_ts)
+
+        for t in range(ivs_ts.shape[0]):
+            ivs = ivs_ts[t]
+
+            a = ivs * np.sqrt(Ts)
+            b = np.exp(ms)
+            d1 = -ms / a + 0.5 * a
+            d2 = -ms / a - 0.5 * a
+
+            phi_d1 = sp.stats.norm.pdf(d1)
+            phi_d2 = sp.stats.norm.pdf(d2)
+            Phi_d2 = sp.stats.norm.cdf(d2)
+
+            dc_dm = -b * Phi_d2
+            d2c_dm2 = b / a * phi_d2 + dc_dm
+
+            dd1_dT = (0.5 * ms / a + 0.25 * a) / Ts
+            dd2_dT = (0.5 * ms / a - 0.25 * a) / Ts
+
+            dc_dT = phi_d1 * dd1_dT - b * phi_d2 * dd2_dT
+
+            ls_dc_dm_bs[t, :] = dc_dm
+            ls_d2c_dm2_bs[t, :] = d2c_dm2
+            ls_dc_dT_bs[t, :] = dc_dT
+
+        return ls_dc_dm_bs, ls_d2c_dm2_bs, ls_dc_dT_bs
